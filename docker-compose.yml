@@ -1,0 +1,54 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: kirana-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-kirana_iq}
+      POSTGRES_USER: ${POSTGRES_USER:-kirana}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kirana}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kirana} -d ${POSTGRES_DB:-kirana_iq}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    container_name: kirana-backend
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-kirana_iq}
+      POSTGRES_USER: ${POSTGRES_USER:-kirana}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kirana}
+      CORS_ORIGINS: http://localhost:5173
+      ENVIRONMENT: docker
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    # Source is mounted so backend edits are picked up without a rebuild.
+    volumes:
+      - ./backend:/app
+      - ./data:/app/data
+      - ./models:/app/models
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: http://localhost:8000
+    container_name: kirana-frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
