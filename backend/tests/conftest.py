@@ -19,9 +19,24 @@ from app.main import app
 from app.models import store as store_model
 
 
+TEST_EMAIL_DOMAIN = "@kiranaiq-tests.com"
+
+
 @pytest.fixture(scope="session", autouse=True)
 def ensure_schema():
     init_db()
+    yield
+    # A catch-all sweep. Individual fixtures clean up after themselves, but a
+    # few tests register accounts directly to assert on the endpoint, and the
+    # suite is often pointed at the same database used for development.
+    execute(
+        "DELETE FROM stores WHERE id IN ("
+        "  SELECT m.store_id FROM store_members m"
+        "  JOIN users u ON u.id = m.user_id"
+        "  WHERE u.email LIKE %s)",
+        (f"%{TEST_EMAIL_DOMAIN}",),
+    )
+    execute("DELETE FROM users WHERE email LIKE %s", (f"%{TEST_EMAIL_DOMAIN}",))
 
 
 @pytest.fixture(scope="session")
@@ -30,12 +45,16 @@ def client() -> TestClient:
 
 
 def _unique_email(label: str = "user") -> str:
-    return f"{label}-{uuid.uuid4().hex[:10]}@kiranaiq-tests.com"
+    return f"{label}-{uuid.uuid4().hex[:10]}{TEST_EMAIL_DOMAIN}"
 
 
 @pytest.fixture(scope="session")
 def owner(client: TestClient) -> dict[str, Any]:
-    """A registered account reused across the suite. Stores are per-test."""
+    """A registered account reused across the suite. Stores are per-test.
+
+    Removed afterwards so a suite run leaves no residue in a database that is
+    also being used for development.
+    """
     email = _unique_email("owner")
     response = client.post(
         "/auth/register",
@@ -43,12 +62,21 @@ def owner(client: TestClient) -> dict[str, Any]:
     )
     assert response.status_code == 201, response.text
     body = response.json()
-    return {
+
+    yield {
         "email": email,
         "password": "test-password-123",
         "token": body["access_token"],
         "user": body["user"],
     }
+
+    # Stores this account still owns cascade away with the membership rows.
+    execute(
+        "DELETE FROM stores WHERE id IN "
+        "(SELECT store_id FROM store_members WHERE user_id = %s)",
+        (body["user"]["id"],),
+    )
+    execute("DELETE FROM users WHERE id = %s", (body["user"]["id"],))
 
 
 @pytest.fixture
@@ -76,6 +104,13 @@ def new_user(client: TestClient):
     yield _create
 
     for user_id in created:
+        # Stores created during the test outlive their creator otherwise:
+        # stores.created_by is SET NULL, so only the membership links them.
+        execute(
+            "DELETE FROM stores WHERE id IN "
+            "(SELECT store_id FROM store_members WHERE user_id = %s)",
+            (user_id,),
+        )
         execute("DELETE FROM users WHERE id = %s", (user_id,))
 
 
