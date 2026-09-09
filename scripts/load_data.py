@@ -16,7 +16,12 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "backend"))
+
+# Locally the app package sits in <repo>/backend. Inside the container the
+# script is mounted at /scripts and the package is already on PYTHONPATH.
+_BACKEND = ROOT / "backend"
+if _BACKEND.is_dir():
+    sys.path.insert(0, str(_BACKEND))
 
 from app.database import close_pool, get_connection, init_db, query_one  # noqa: E402
 

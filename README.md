@@ -637,26 +637,85 @@ movers, and the anomaly table.
 
 ![Products](docs/screenshots/products.png)
 
+## Quick Start
+
+Two scripts handle the whole lifecycle. The only prerequisite is Docker.
+
+```bash
+./start.sh          # build, seed, train, and serve
+./stop.sh           # stop everything, keep the data
+```
+
+`start.sh` is idempotent and safe to re-run: it starts Docker if it is not
+running, waits for Postgres to become healthy, seeds the database only when it
+is empty, trains a model only when none exists, and prints the URLs when
+everything is answering. A first run takes about a minute; later runs take
+seconds.
+
+```
+[4/6] Seeding the database
+      empty database — generating and loading the sample dataset
+      ✓ 30 products and ~11k sales rows loaded
+
+[5/6] Preparing the forecasting model
+      training (takes a few seconds)
+      Selected: HistGradientBoosting
+      WAPE improvement over baseline: 11.6%
+
+  Kirana-IQ is running
+
+    Dashboard   http://localhost:5173
+    API         http://localhost:8000
+    API docs    http://localhost:8000/docs
+
+    6 critical · 2 high risk · 6 overstocked
+```
+
+| Command | What it does |
+| ------- | ------------ |
+| `./start.sh` | Everything in Docker, with live reload |
+| `./start.sh --local` | Only Postgres in Docker; API and dashboard run on the host |
+| `./start.sh --prod` | Production images: built bundle, no mounts, no reloaders |
+| `./start.sh --reset` | Delete the database and reseed from scratch |
+| `./start.sh --rebuild` | Force a rebuild of the Docker images |
+| `./start.sh --no-seed` / `--no-train` | Skip seeding or training |
+| `./stop.sh` | Stop containers and any host processes; keep all data |
+| `./stop.sh --reset` | Also delete the database volume |
+| `./stop.sh --clean` | Also remove generated CSVs, models and logs |
+
+Both scripts take `--help`. In `--local` mode the host processes are tracked by
+PID in `.run/`, with logs at `.run/backend.log` and `.run/frontend.log`, and
+`stop.sh` shuts them down along with their children.
+
+Seeding and training run **inside the backend container**, so the default path
+needs no Python on the host at all. `--local` mode is the one that requires
+Python and Node.
+
 ## Installation
 
-### Option A — Docker (recommended)
+### Option A — the start script (recommended)
 
 ```bash
 git clone <repository-url>
 cd Kirana-IQ
-cp .env.example .env
-docker compose up --build
+./start.sh
 ```
 
-Then seed the database (in a second terminal):
+That covers everything below automatically. The manual steps are documented
+here because they are worth understanding, and because you will want them
+individually while developing.
+
+### Option B — Docker by hand
 
 ```bash
-python scripts/generate_data.py
-python scripts/load_data.py --truncate
+cp .env.example .env
+docker compose up --build
 
-cd backend
-python -m app.ml.train_model    # trains and saves models/demand_model.joblib
-python -m app.ml.evaluate       # horizon backtest
+# in a second terminal, seed and train inside the container
+docker compose exec -e PYTHONPATH=/app backend python /scripts/generate_data.py
+docker compose exec -e PYTHONPATH=/app backend python /scripts/load_data.py --truncate
+docker compose exec backend python -m app.ml.train_model
+docker compose exec backend python -m app.ml.evaluate   # horizon backtest
 ```
 
 Services:
@@ -665,7 +724,7 @@ Services:
 - Backend — http://localhost:8000 (docs at http://localhost:8000/docs)
 - PostgreSQL — `localhost:5432`
 
-### Option B — Local development
+### Option C — Local development
 
 PostgreSQL must be reachable. The quickest way is to run just the database
 container:
@@ -873,6 +932,8 @@ Kirana-IQ/
 ├── scripts/
 │   ├── generate_data.py       # reproducible synthetic dataset
 │   └── load_data.py           # CSV -> PostgreSQL via COPY
+├── start.sh                   # build, seed, train and serve
+├── stop.sh                    # stop, optionally reset and clean
 ├── docs/screenshots/          # dashboard images used in this README
 ├── .github/workflows/ci.yml
 ├── docker-compose.yml         # development stack (source mounted)
