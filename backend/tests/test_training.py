@@ -18,16 +18,16 @@ from app.models import product as product_model
 
 
 @pytest.fixture(scope="module")
-def dataset():
-    if not product_model.list_products(limit=1):
-        pytest.skip("database is empty; run scripts/load_data.py")
-    return load_dataset()
+def dataset(demo_store_id):
+    if demo_store_id is None or not product_model.list_products(demo_store_id, limit=1):
+        pytest.skip("no demo store; run scripts/seed_demo.py")
+    return load_dataset(demo_store_id)
 
 
 @pytest.fixture(scope="module")
-def report(dataset):
+def report(dataset, demo_store_id):
     # save=False keeps the test run from overwriting the committed model.
-    return train(save=False)
+    return train(demo_store_id, save=False)
 
 
 def test_dataset_contains_every_declared_feature(dataset):

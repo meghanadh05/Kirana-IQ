@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import math
 from datetime import date, timedelta
 from pathlib import Path
@@ -141,17 +142,61 @@ def event_factor(day: date, category: str, events: list[dict]) -> float:
     return factor
 
 
+# Typical gross margin per category. Staples are thin, personal care is fat —
+# a flat markup would make every product look equally profitable, which is the
+# one thing the profit analytics exist to disprove.
+CATEGORY_MARGIN = {
+    "Dairy": 0.12,
+    "Bakery": 0.22,
+    "Snacks": 0.20,
+    "Beverages": 0.18,
+    "Rice & Grains": 0.10,
+    "Personal Care": 0.30,
+    "Household": 0.25,
+}
+
+# GST-style rates. Unprocessed staples are zero-rated in India; packaged goods
+# and personal care are not.
+CATEGORY_TAX = {
+    "Dairy": 5.0,
+    "Bakery": 5.0,
+    "Snacks": 12.0,
+    "Beverages": 12.0,
+    "Rice & Grains": 0.0,
+    "Personal Care": 18.0,
+    "Household": 18.0,
+}
+
+
+def _barcode(sku: str) -> str:
+    digest = hashlib.md5(sku.encode("utf-8")).hexdigest()
+    return f"890{int(digest, 16) % 10**10:010d}"
+
+
 def build_products(rng: np.random.Generator) -> list[dict]:
     products = []
     per_category_index: dict[str, int] = {}
     for name, price, base_demand, category in PRODUCT_CATALOGUE:
         per_category_index[category] = per_category_index.get(category, 0) + 1
         sku = f"{CATEGORY_CODE[category]}-{per_category_index[category]:03d}"
+        margin = CATEGORY_MARGIN.get(category, 0.20)
         products.append(
             {
                 "sku": sku,
+                # A 13-digit code in the GS1 India prefix range, derived from the
+                # SKU so regenerating the dataset keeps the same barcodes.
+                # md5 rather than hash(): str hashing is salted per process, so
+                # hash() would break the generator's reproducibility guarantee.
+                "barcode": _barcode(sku),
                 "name": name,
+                # The brand is the leading word of the product name, which is how
+                # these products are actually shelved.
+                "brand": name.split()[0],
                 "category": category,
+                "unit": "piece",
+                "selling_price": round(price, 2),
+                "cost_price": round(price * (1 - margin), 2),
+                "tax_rate": CATEGORY_TAX.get(category, 0.0),
                 "unit_price": round(price, 2),
                 "base_demand": base_demand,
                 # Trend over the whole window: mostly flat, some clear movers.
@@ -292,7 +337,10 @@ def main() -> None:
     write_csv(
         DATA_DIR / "products.csv",
         products,
-        ["sku", "name", "category", "unit_price", "current_stock", "reorder_level", "lead_time_days"],
+        [
+            "sku", "barcode", "name", "brand", "category", "unit", "selling_price",
+            "cost_price", "tax_rate", "current_stock", "reorder_level", "lead_time_days",
+        ],
     )
     write_csv(DATA_DIR / "sales.csv", sales, ["sku", "sale_date", "quantity", "unit_price"])
 

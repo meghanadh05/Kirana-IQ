@@ -380,9 +380,9 @@ BEGIN
     -- '!' is not a valid bcrypt hash, so this account cannot be logged into.
     -- scripts/seed_demo.py sets a real password when a demo login is wanted.
     INSERT INTO users (email, password_hash, full_name)
-    VALUES ('demo@kirana-iq.local', '!', 'Demo Owner')
+    VALUES ('demo@demo.kirana-iq.com', '!', 'Demo Owner')
     ON CONFLICT (email) DO NOTHING;
-    SELECT id INTO demo_user_id FROM users WHERE email = 'demo@kirana-iq.local';
+    SELECT id INTO demo_user_id FROM users WHERE email = 'demo@demo.kirana-iq.com';
 
     SELECT id INTO demo_store_id FROM stores WHERE is_demo = TRUE ORDER BY id LIMIT 1;
     IF demo_store_id IS NULL THEN

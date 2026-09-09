@@ -32,28 +32,18 @@ jobs:
       - name: Install dependencies
         working-directory: backend
         run: pip install -r requirements.txt
-      - name: Generate and load synthetic dataset
+      - name: Generate and seed the demo store
         env:
           POSTGRES_HOST: localhost
           POSTGRES_PORT: 5432
           POSTGRES_DB: kirana_iq
           POSTGRES_USER: kirana
           POSTGRES_PASSWORD: kirana
+        # --train writes the shared model as well, which is what a store without
+        # its own trained model falls back to.
         run: |
           python scripts/generate_data.py
-          python scripts/load_data.py --truncate
-
-      - name: Train the forecasting model
-        working-directory: backend
-        env:
-          POSTGRES_HOST: localhost
-          POSTGRES_PORT: 5432
-          POSTGRES_DB: kirana_iq
-          POSTGRES_USER: kirana
-          POSTGRES_PASSWORD: kirana
-        # Without a trained model the forecast and inventory tests skip, and CI
-        # would report green while covering 18 fewer tests.
-        run: python -m app.ml.train_model
+          python scripts/seed_demo.py --reset --train
 
       - name: Run tests
         working-directory: backend
@@ -73,9 +63,9 @@ jobs:
           POSTGRES_DB: kirana_iq
           POSTGRES_USER: kirana
           POSTGRES_PASSWORD: kirana
-        # The suite skips gracefully when the database or model is missing, which
-        # is right for a fresh clone and wrong for CI: here everything is present,
-        # so a skip means the environment is broken.
+        # The suite skips gracefully when the demo store or model is missing,
+        # which is right for a fresh clone and wrong for CI: here everything is
+        # present, so a skip means the environment is broken.
         run: |
           output=$(pytest -q -rs 2>&1)
           echo "$output"

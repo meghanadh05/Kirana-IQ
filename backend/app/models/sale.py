@@ -299,3 +299,132 @@ def set_status(sale_id: int, store_id: int, status: str) -> dict[str, Any] | Non
         f"UPDATE sales SET status = %s WHERE id = %s AND store_id = %s RETURNING {SALE_COLUMNS}",
         (status, sale_id, store_id),
     )
+
+
+# --------------------------------------------------------------------------
+# Business analytics
+# --------------------------------------------------------------------------
+
+
+def kpis(store_id: int, start_date: date, end_date: date) -> dict[str, Any]:
+    """Revenue, orders, units and cost of goods sold for a period.
+
+    Gross profit here is revenue net of tax minus COGS — tax collected is not
+    the shop's money, so counting it as revenue would overstate the margin.
+    """
+    return query_one(
+        """
+        SELECT COUNT(*)                                   AS orders,
+               COALESCE(SUM(total), 0)                    AS revenue,
+               COALESCE(SUM(tax), 0)                      AS tax,
+               COALESCE(SUM(discount), 0)                 AS discount,
+               COALESCE(SUM(cost_total), 0)               AS cost_of_goods,
+               COALESCE(AVG(total), 0)                    AS average_order_value,
+               COALESCE((SELECT SUM(i.quantity) FROM sale_items i
+                          JOIN sales s2 ON s2.id = i.sale_id
+                         WHERE s2.store_id = %(store_id)s AND s2.status = 'COMPLETED'
+                           AND s2.sale_date BETWEEN %(start)s AND %(end)s), 0) AS units
+        FROM sales
+        WHERE store_id = %(store_id)s AND status = 'COMPLETED'
+          AND sale_date BETWEEN %(start)s AND %(end)s
+        """,
+        {"store_id": store_id, "start": start_date, "end": end_date},
+    )
+
+
+def revenue_series(store_id: int, start_date: date, end_date: date) -> list[dict[str, Any]]:
+    """Revenue, orders and profit per day.
+
+    generate_series fills days with no sales as zeros, so the chart shows a
+    closed shop as a flat line rather than skipping the day entirely.
+    """
+    return query_all(
+        """
+        SELECT day::date                            AS date,
+               COALESCE(SUM(s.total), 0)            AS revenue,
+               COALESCE(SUM(s.cost_total), 0)       AS cost,
+               COALESCE(SUM(s.tax), 0)              AS tax,
+               COUNT(s.id)                          AS orders
+        FROM generate_series(%(start)s::date, %(end)s::date, '1 day') AS day
+        LEFT JOIN sales s
+               ON s.sale_date = day::date
+              AND s.store_id = %(store_id)s
+              AND s.status = 'COMPLETED'
+        GROUP BY day
+        ORDER BY day
+        """,
+        {"store_id": store_id, "start": start_date, "end": end_date},
+    )
+
+
+def payment_split(store_id: int, start_date: date, end_date: date) -> list[dict[str, Any]]:
+    return query_all(
+        """
+        SELECT payment_method, COUNT(*) AS orders, COALESCE(SUM(total), 0) AS revenue
+        FROM sales
+        WHERE store_id = %s AND status = 'COMPLETED' AND sale_date BETWEEN %s AND %s
+        GROUP BY payment_method
+        ORDER BY revenue DESC
+        """,
+        (store_id, start_date, end_date),
+    )
+
+
+def recent_sales(store_id: int, limit: int = 8) -> list[dict[str, Any]]:
+    return query_all(
+        """
+        SELECT s.id, s.invoice_number, s.total, s.payment_method, s.customer_name,
+               s.status, s.created_at,
+               COALESCE(SUM(i.quantity), 0) AS unit_count
+        FROM sales s
+        LEFT JOIN sale_items i ON i.sale_id = s.id
+        WHERE s.store_id = %s
+        GROUP BY s.id
+        ORDER BY s.created_at DESC
+        LIMIT %s
+        """,
+        (store_id, limit),
+    )
+
+
+def product_performance(
+    store_id: int, start_date: date, end_date: date, limit: int = 500
+) -> list[dict[str, Any]]:
+    """Units, revenue, cost and profit per product for a period."""
+    return query_all(
+        """
+        SELECT p.id AS product_id, p.sku, p.name, p.category, p.current_stock,
+               p.cost_price, p.selling_price,
+               COALESCE(SUM(i.quantity), 0)                   AS total_units,
+               COALESCE(SUM(i.line_total), 0)                 AS total_revenue,
+               COALESCE(SUM(i.quantity * i.cost_price), 0)    AS total_cost,
+               COALESCE(SUM(i.line_total - i.tax_amount
+                            - i.quantity * i.cost_price), 0)  AS gross_profit
+        FROM products p
+        LEFT JOIN sale_items i
+               ON i.product_id = p.id AND i.sale_date BETWEEN %(start)s AND %(end)s
+        LEFT JOIN sales s ON s.id = i.sale_id AND s.status = 'COMPLETED'
+        WHERE p.store_id = %(store_id)s AND p.is_active = TRUE
+        GROUP BY p.id
+        ORDER BY total_revenue DESC
+        LIMIT %(limit)s
+        """,
+        {"store_id": store_id, "start": start_date, "end": end_date, "limit": limit},
+    )
+
+
+def tax_summary(store_id: int, start_date: date, end_date: date) -> list[dict[str, Any]]:
+    return query_all(
+        """
+        SELECT i.tax_rate,
+               COALESCE(SUM(i.line_total - i.tax_amount), 0) AS taxable_value,
+               COALESCE(SUM(i.tax_amount), 0)                AS tax_collected,
+               COUNT(DISTINCT i.sale_id)                     AS invoices
+        FROM sale_items i
+        JOIN sales s ON s.id = i.sale_id
+        WHERE i.store_id = %s AND s.status = 'COMPLETED' AND i.sale_date BETWEEN %s AND %s
+        GROUP BY i.tax_rate
+        ORDER BY i.tax_rate
+        """,
+        (store_id, start_date, end_date),
+    )

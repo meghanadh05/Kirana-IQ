@@ -143,41 +143,41 @@ def test_missing_days_count_as_zero_demand():
 
 
 @pytest.fixture(scope="module")
-def seeded():
-    if not product_model.list_products(limit=1):
-        pytest.skip("database is empty; run scripts/load_data.py")
+def seeded(demo_store_id):
+    if not product_model.list_products(demo_store_id, limit=1):
+        pytest.skip("no demo store; run scripts/seed_demo.py")
 
 
-def test_top_products_are_ordered_by_units(seeded):
-    rows = top_products(limit=5)
+def test_top_products_are_ordered_by_units(seeded, demo_store_id):
+    rows = top_products(demo_store_id, limit=5)
     units = [row["total_units"] for row in rows]
     assert units == sorted(units, reverse=True)
 
 
-def test_top_products_respects_limit(seeded):
-    assert len(top_products(limit=3)) <= 3
+def test_top_products_respects_limit(seeded, demo_store_id):
+    assert len(top_products(demo_store_id, limit=3)) <= 3
 
 
-def test_top_products_report_revenue(seeded):
-    assert all(row["total_revenue"] > 0 for row in top_products(limit=5))
+def test_top_products_report_revenue(seeded, demo_store_id):
+    assert all(row["total_revenue"] > 0 for row in top_products(demo_store_id, limit=5))
 
 
-def test_slow_movers_sell_less_than_top_sellers(seeded):
-    fastest = top_products(limit=1)
-    slowest = slow_moving(limit=1)
+def test_slow_movers_sell_less_than_top_sellers(seeded, demo_store_id):
+    fastest = top_products(demo_store_id, limit=1)
+    slowest = slow_moving(demo_store_id, limit=1)
     if not slowest:
         pytest.skip("no slow movers in this dataset")
     assert slowest[0]["total_units"] < fastest[0]["total_units"]
 
 
-def test_category_trends_cover_every_category(seeded):
-    trends = category_trends()
+def test_category_trends_cover_every_category(seeded, demo_store_id):
+    trends = category_trends(demo_store_id)
     categories = {row["category"] for row in trends}
-    assert categories == set(product_model.list_categories())
+    assert categories == set(product_model.list_categories(demo_store_id))
 
 
-def test_category_trend_direction_matches_the_numbers(seeded):
-    for row in category_trends():
+def test_category_trend_direction_matches_the_numbers(seeded, demo_store_id):
+    for row in category_trends(demo_store_id):
         if row["direction"] == "UP":
             assert row["current_units"] > row["previous_units"]
         elif row["direction"] == "DOWN":
@@ -191,8 +191,8 @@ def test_category_trend_direction_matches_the_numbers(seeded):
 # --------------------------------------------------------------------------
 
 
-def test_overview_returns_every_documented_field(client, seeded):
-    body = client.get("/analytics/overview").json()
+def test_overview_returns_every_documented_field(client, seeded, demo_headers):
+    body = client.get("/analytics/overview", headers=demo_headers).json()
     expected = {
         "total_products", "critical_products", "high_risk_products",
         "medium_risk_products", "low_risk_products", "overstocked_products",
@@ -202,21 +202,21 @@ def test_overview_returns_every_documented_field(client, seeded):
     assert expected == set(body)
 
 
-def test_overview_anomaly_limit_is_respected(client, seeded):
-    body = client.get("/analytics/overview", params={"anomaly_limit": 2}).json()
+def test_overview_anomaly_limit_is_respected(client, seeded, demo_headers):
+    body = client.get("/analytics/overview", headers=demo_headers, params={"anomaly_limit": 2}).json()
     assert len(body["anomalies"]) <= 2
     # The count is the full total, not the truncated list.
     assert body["anomaly_count"] >= len(body["anomalies"])
 
 
-def test_anomalies_endpoint_sorts_by_deviation(client, seeded):
-    rows = client.get("/analytics/anomalies").json()
+def test_anomalies_endpoint_sorts_by_deviation(client, seeded, demo_headers):
+    rows = client.get("/analytics/anomalies", headers=demo_headers).json()
     scores = [abs(row["z_score"]) for row in rows if row["z_score"] is not None]
     assert scores == sorted(scores, reverse=True)
 
 
-def test_every_anomaly_carries_a_readable_message(client, seeded):
-    rows = client.get("/analytics/anomalies").json()
+def test_every_anomaly_carries_a_readable_message(client, seeded, demo_headers):
+    rows = client.get("/analytics/anomalies", headers=demo_headers).json()
     assert all(len(row["message"]) > 20 for row in rows)
 
 
@@ -231,5 +231,5 @@ def test_every_anomaly_carries_a_readable_message(client, seeded):
         ("/analytics/anomalies", {"limit": 200}),
     ],
 )
-def test_invalid_analytics_parameters_are_rejected(client, path, params):
-    assert client.get(path, params=params).status_code == 422
+def test_invalid_analytics_parameters_are_rejected(client, demo_headers, path, params):
+    assert client.get(path, headers=demo_headers, params=params).status_code == 422

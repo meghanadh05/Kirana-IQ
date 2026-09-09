@@ -186,35 +186,39 @@ run_py() {
 if [[ "$SEED" == false ]]; then
   warn "--no-seed: skipping"
 else
-  # An empty catalogue returns "[]". Compare the body directly rather than
-  # piping through grep, which exits non-zero on no match and would abort the
-  # script under `set -o pipefail` on exactly the first-run path.
-  PRODUCTS=$(curl -sf "$API_URL/products?limit=1" 2>/dev/null || echo "[]")
-  if [[ "$PRODUCTS" == "[]" || -z "$PRODUCTS" ]]; then
-    info "empty database — generating and loading the sample dataset"
+  # The catalogue endpoint needs a signed-in user now, so the "is it already
+  # seeded?" question is asked of the seed script itself: it exits non-zero
+  # with an explanation when the demo store already holds data.
+  if [[ ! -f data/products.csv ]]; then
+    info "generating the synthetic dataset"
     run_py generate_data.py >/dev/null
-    run_py load_data.py --truncate >/dev/null
-    ok "30 products and ~11k sales rows loaded"
+  fi
+
+  if run_py seed_demo.py >/dev/null 2>&1; then
+    ok "demo store seeded: 30 products, ~11k sale lines"
   else
-    ok "database already seeded"
+    ok "demo store already seeded"
   fi
 fi
 
 # ------------------------------------------------------------ 5. training
 step "Preparing the forecasting model"
 
-MODEL_TRAINED=$(curl -sf "$API_URL/model" 2>/dev/null | grep -o '"trained":true' || true)
-
+# The model file is the source of truth here; /model needs authentication.
 if [[ "$TRAIN" == false ]]; then
-  warn "--no-train: skipping (forecast endpoints will return 503)"
-elif [[ -n "$MODEL_TRAINED" ]]; then
+  warn "--no-train: skipping (forecast pages will show an untrained model)"
+elif [[ -f models/demand_model.joblib ]]; then
   ok "model already trained"
 else
-  info "training (takes a few seconds)"
+  info "training on the demo store (takes a few seconds)"
+  # --shared also writes models/demand_model.joblib, the fallback a brand-new
+  # store forecasts with until it has trained a model of its own.
   if [[ "$MODE" == "local" ]]; then
-    ( cd backend && ../.venv/bin/python -m app.ml.train_model 2>&1 | tail -4 | sed 's/^/      /' )
+    ( cd backend && ../.venv/bin/python -m app.ml.train_model --store-id 1 --shared 2>&1 \
+        | tail -4 | sed 's/^/      /' )
   else
-    "${COMPOSE[@]}" exec -T backend python -m app.ml.train_model 2>&1 | tail -4 | sed 's/^/      /'
+    "${COMPOSE[@]}" exec -T backend python -m app.ml.train_model --store-id 1 --shared 2>&1 \
+      | tail -4 | sed 's/^/      /'
   fi
   ok "model trained and saved to models/"
 fi

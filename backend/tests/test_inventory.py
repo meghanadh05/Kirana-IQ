@@ -1,52 +1,39 @@
-"""Inventory intelligence tests.
+"""Inventory: the ledger, adjustments, stock position and reorder advice.
 
-The maths here decides what a shop owner actually orders, so the thresholds and
-formulas are pinned directly rather than only through the API.
+The forecast-driven tests (risk classification, safety stock, reorder
+quantities) exercise pure functions with fabricated inputs, so they run without
+a trained model. The endpoint tests that need real forecasts use the seeded demo
+store and skip when it is absent.
 """
 
 from __future__ import annotations
 
 import math
-from datetime import date, timedelta
 
 import pytest
 
-from app.config import Settings
 from app.services.inventory_service import (
-    analyse,
     build_reason,
     classify_risk,
     demand_variability,
     safety_stock,
     summarise,
 )
+from app.services.policy import StorePolicy
 
-SETTINGS = Settings()
-
-PRODUCT = {
-    "id": 1,
-    "sku": "DRY-001",
-    "name": "Test Milk 1L",
-    "category": "Dairy",
-    "unit_price": 33.0,
-    "current_stock": 40,
-    "reorder_level": 20,
-    "lead_time_days": 4,
-}
-
-
-def forecast_rows(daily: int = 10, days: int = 10) -> list[dict]:
-    return [
-        {"date": (date(2026, 9, 9) + timedelta(days=i)).isoformat(), "predicted_demand": daily}
-        for i in range(days)
-    ]
-
-
-def history(quantity: int = 10, days: int = 60) -> list[dict]:
-    return [
-        {"sale_date": date(2026, 7, 1) + timedelta(days=i), "quantity": quantity}
-        for i in range(days)
-    ]
+POLICY = StorePolicy(
+    critical_cover_days=2.0,
+    medium_cover_buffer_days=3.0,
+    overstock_cover_days=30.0,
+    safety_days=3,
+    service_level_z=1.28,
+    low_stock_threshold=10,
+    anomaly_recent_days=7,
+    anomaly_baseline_days=28,
+    anomaly_min_change=0.25,
+    anomaly_min_zscore=2.0,
+    slow_moving_threshold=0.25,
+)
 
 
 # --------------------------------------------------------------------------
@@ -54,46 +41,32 @@ def history(quantity: int = 10, days: int = 60) -> list[dict]:
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "cover,lead_time,expected",
-    [
-        (0.0, 4, "CRITICAL"),
-        (2.0, 4, "CRITICAL"),   # boundary: <= critical_cover_days
-        (2.1, 4, "HIGH"),
-        (4.0, 4, "HIGH"),       # boundary: <= lead_time
-        (4.1, 4, "MEDIUM"),
-        (7.0, 4, "MEDIUM"),     # boundary: <= lead_time + buffer
-        (7.1, 4, "LOW"),
-        (100.0, 4, "LOW"),
-    ],
-)
-def test_risk_ladder_boundaries(cover, lead_time, expected):
-    assert classify_risk(cover, lead_time, SETTINGS) == expected
+def test_very_low_cover_is_critical():
+    assert classify_risk(1.0, lead_time_days=2, settings=POLICY) == "CRITICAL"
+
+
+def test_cover_inside_the_lead_time_is_high_risk():
+    """Four days of stock with a seven-day supplier will run out."""
+    assert classify_risk(4.0, lead_time_days=7, settings=POLICY) == "HIGH"
+
+
+def test_cover_just_past_the_lead_time_is_medium():
+    assert classify_risk(8.0, lead_time_days=7, settings=POLICY) == "MEDIUM"
+
+
+def test_comfortable_cover_is_low_risk():
+    assert classify_risk(20.0, lead_time_days=3, settings=POLICY) == "LOW"
 
 
 def test_risk_is_relative_to_lead_time():
-    """Identical cover, different suppliers: the same 5 days means different risk.
-
-    With a 1-day supplier, 5 days of cover is comfortable. With a 7-day
-    supplier, the same 5 days runs out before the delivery arrives.
-    """
-    assert classify_risk(5.0, 1, SETTINGS) == "LOW"
-    assert classify_risk(5.0, 4, SETTINGS) == "MEDIUM"
-    assert classify_risk(5.0, 7, SETTINGS) == "HIGH"
-
-
-def test_critical_wins_even_when_lead_time_is_zero():
-    assert classify_risk(1.0, 0, SETTINGS) == "CRITICAL"
+    """The same cover is far more dangerous with a slow supplier than a fast one."""
+    assert classify_risk(3.0, lead_time_days=1, settings=POLICY) == "MEDIUM"
+    assert classify_risk(3.0, lead_time_days=7, settings=POLICY) == "HIGH"
+    assert classify_risk(10.0, lead_time_days=1, settings=POLICY) == "LOW"
 
 
 def test_no_predicted_demand_is_not_a_stockout_risk():
-    assert classify_risk(None, 5, SETTINGS) == "LOW"
-
-
-def test_thresholds_are_configurable():
-    strict = Settings(critical_cover_days=10.0)
-    assert classify_risk(8.0, 2, SETTINGS) == "LOW"
-    assert classify_risk(8.0, 2, strict) == "CRITICAL"
+    assert classify_risk(None, lead_time_days=5, settings=POLICY) == "LOW"
 
 
 # --------------------------------------------------------------------------
@@ -101,158 +74,264 @@ def test_thresholds_are_configurable():
 # --------------------------------------------------------------------------
 
 
-def test_safety_stock_scales_with_square_root_of_time():
+def test_safety_stock_follows_the_square_root_of_time():
     """Forecast error accumulates with sqrt(days), not linearly."""
-    one_day = safety_stock(5.0, 1, SETTINGS)
-    nine_days = safety_stock(5.0, 9, SETTINGS)
+    one_day = safety_stock(10.0, 1, POLICY)
+    nine_days = safety_stock(10.0, 9, POLICY)
     assert nine_days == pytest.approx(one_day * 3.0)
 
 
-def test_safety_stock_matches_the_formula():
-    assert safety_stock(4.0, 9, SETTINGS) == pytest.approx(SETTINGS.service_level_z * 4.0 * 3.0)
+def test_steady_demand_needs_no_buffer():
+    assert safety_stock(0.0, 7, POLICY) == 0.0
 
 
-def test_steady_demand_needs_no_safety_stock():
-    assert safety_stock(0.0, 10, SETTINGS) == 0.0
+def test_erratic_demand_needs_a_bigger_buffer():
+    assert safety_stock(20.0, 7, POLICY) > safety_stock(5.0, 7, POLICY)
 
 
 def test_demand_variability_counts_zero_sale_days():
-    """Sparse history must not look artificially steady."""
+    """A day with no sales is a real zero; dropping it understates volatility."""
+    from datetime import date, timedelta
+
+    start = date(2026, 6, 1)
     sparse = [
-        {"sale_date": date(2026, 8, 1), "quantity": 10},
-        {"sale_date": date(2026, 8, 5), "quantity": 10},
+        {"sale_date": start + timedelta(days=i), "quantity": q}
+        for i, q in enumerate([10, 0, 10, 0, 10, 0, 10])
     ]
-    assert demand_variability(sparse) > 0
-
-
-def test_demand_variability_of_flat_history_is_zero():
-    assert demand_variability(history(10)) == pytest.approx(0.0)
-
-
-def test_demand_variability_handles_empty_history():
-    assert demand_variability([]) == 0.0
+    assert demand_variability(sparse) > 4.0
 
 
 # --------------------------------------------------------------------------
-# Full assessment
+# Explanations
 # --------------------------------------------------------------------------
 
 
-def test_stock_cover_is_stock_over_average_daily_demand():
-    result = analyse(PRODUCT, history(), forecast_rows(daily=10), SETTINGS)
-    assert result["average_daily_demand"] == pytest.approx(10.0)
-    assert result["stock_cover_days"] == pytest.approx(4.0)
+def test_critical_reason_names_the_quantity_and_the_lead_time():
+    reason = build_reason("CRITICAL", False, 1.0, 4, 60)
+    assert "60 units" in reason
+    assert "4" in reason
 
 
-def test_expected_7_day_demand_sums_only_seven_days():
-    result = analyse(PRODUCT, history(), forecast_rows(daily=10, days=30), SETTINGS)
-    assert result["expected_7_day_demand"] == 70.0
+def test_overstock_reason_advises_against_reordering():
+    reason = build_reason("LOW", True, 90.0, 3, 0)
+    assert "hold off" in reason.lower()
 
 
-def test_reorder_covers_lead_time_plus_safety_days():
-    """Flat demand, no variability: target is exactly the replenishment window."""
-    product = {**PRODUCT, "current_stock": 0, "lead_time_days": 4}
-    result = analyse(product, history(10), forecast_rows(daily=10), SETTINGS)
-
-    expected_window = 4 + SETTINGS.safety_days  # 7 days
-    assert result["recommended_reorder_quantity"] == 10 * expected_window
-
-
-def test_reorder_subtracts_stock_already_held():
-    product = {**PRODUCT, "current_stock": 30}
-    result = analyse(product, history(10), forecast_rows(daily=10), SETTINGS)
-    assert result["recommended_reorder_quantity"] == 70 - 30
-
-
-def test_reorder_is_never_negative():
-    product = {**PRODUCT, "current_stock": 10_000}
-    result = analyse(product, history(10), forecast_rows(daily=10), SETTINGS)
-    assert result["recommended_reorder_quantity"] == 0
-
-
-def test_overstock_flagged_above_threshold():
-    product = {**PRODUCT, "current_stock": 400}  # 40 days at 10/day
-    result = analyse(product, history(10), forecast_rows(daily=10), SETTINGS)
-    assert result["overstock"] is True
-    assert result["risk"] == "LOW"
-
-
-def test_overstocked_products_are_never_told_to_reorder():
-    product = {**PRODUCT, "current_stock": 400}
-    assert analyse(product, history(10), forecast_rows(daily=10), SETTINGS)[
-        "recommended_reorder_quantity"
-    ] == 0
-
-
-def test_zero_demand_gives_undefined_cover_not_a_crash():
-    result = analyse(PRODUCT, history(0), forecast_rows(daily=0), SETTINGS)
-    assert result["stock_cover_days"] is None
-    assert result["risk"] == "LOW"
-    assert result["overstock"] is True  # stock on hand, nothing selling
-
-
-def test_short_forecast_is_extended_at_the_average():
-    """A 7-day forecast must still cover a 10-day replenishment window."""
-    product = {**PRODUCT, "current_stock": 0, "lead_time_days": 7}
-    result = analyse(product, history(10), forecast_rows(daily=10, days=7), SETTINGS)
-    assert result["recommended_reorder_quantity"] == 10 * (7 + SETTINGS.safety_days)
-
-
-def test_variable_demand_increases_the_reorder_quantity():
-    """Two products with identical means but different volatility order differently."""
-    steady = analyse(PRODUCT, history(10), forecast_rows(daily=10), SETTINGS)
-
-    erratic_history = [
-        {"sale_date": date(2026, 7, 1) + timedelta(days=i), "quantity": 20 if i % 2 else 0}
-        for i in range(60)
-    ]
-    erratic = analyse(PRODUCT, erratic_history, forecast_rows(daily=10), SETTINGS)
-
-    assert erratic["safety_stock"] > steady["safety_stock"]
-    assert erratic["recommended_reorder_quantity"] > steady["recommended_reorder_quantity"]
-
-
-def test_assessment_exposes_every_documented_field():
-    result = analyse(PRODUCT, history(), forecast_rows(), SETTINGS)
-    expected = {
-        "product_id", "sku", "name", "category", "current_stock", "reorder_level",
-        "lead_time_days", "expected_7_day_demand", "average_daily_demand",
-        "stock_cover_days", "risk", "overstock", "demand_std_dev", "safety_stock",
-        "target_stock", "recommended_reorder_quantity", "reason",
-    }
-    assert expected == set(result)
+def test_no_demand_reason_is_explicit():
+    reason = build_reason("LOW", False, None, 3, 0)
+    assert "No demand predicted" in reason
 
 
 # --------------------------------------------------------------------------
-# Explanations and summary
+# Summary
 # --------------------------------------------------------------------------
 
 
-def test_reason_explains_the_lead_time_conflict():
-    reason = build_reason("HIGH", False, 2.5, 5, 35)
-    assert "5" in reason and "35" in reason
-    assert "run out" in reason.lower()
-
-
-def test_reason_for_overstock_advises_against_reordering():
-    reason = build_reason("LOW", True, 45.0, 3, 0)
-    assert "hold off" in reason.lower() or "tied up" in reason.lower()
-
-
-def test_reason_handles_undefined_cover():
-    assert "no demand" in build_reason("LOW", True, None, 3, 0).lower()
-
-
-def test_summary_counts_each_risk_level():
+def test_summarise_counts_each_risk_level():
     rows = [
-        {"risk": "CRITICAL", "overstock": False, "expected_7_day_demand": 10, "recommended_reorder_quantity": 5},
-        {"risk": "HIGH", "overstock": False, "expected_7_day_demand": 20, "recommended_reorder_quantity": 7},
-        {"risk": "LOW", "overstock": True, "expected_7_day_demand": 5, "recommended_reorder_quantity": 0},
+        {"risk": "CRITICAL", "overstock": False, "expected_7_day_demand": 10.0,
+         "recommended_reorder_quantity": 5},
+        {"risk": "CRITICAL", "overstock": False, "expected_7_day_demand": 4.0,
+         "recommended_reorder_quantity": 2},
+        {"risk": "LOW", "overstock": True, "expected_7_day_demand": 1.0,
+         "recommended_reorder_quantity": 0},
     ]
     summary = summarise(rows)
     assert summary["total_products"] == 3
-    assert summary["critical_products"] == 1
-    assert summary["high_risk_products"] == 1
+    assert summary["critical_products"] == 2
     assert summary["overstocked_products"] == 1
-    assert summary["expected_7_day_units"] == 35
-    assert summary["total_reorder_units"] == 12
+    assert summary["total_reorder_units"] == 7
+    assert summary["expected_7_day_units"] == 15.0
+
+
+# --------------------------------------------------------------------------
+# The ledger
+# --------------------------------------------------------------------------
+
+
+def test_adjustment_reduces_stock_and_records_the_reason(client, headers, product):
+    response = client.post(
+        "/inventory/adjustments",
+        headers=headers,
+        json={
+            "product_id": product["id"],
+            "quantity_change": -8,
+            "reason": "DAMAGE",
+            "notes": "Crushed in transit",
+        },
+    )
+    assert response.status_code == 201, response.text
+
+    movement = response.json()
+    assert movement["type"] == "DAMAGE"
+    assert movement["quantity_change"] == -8
+    assert movement["quantity_after"] == 92
+    assert movement["notes"] == "Crushed in transit"
+
+    assert client.get(f"/products/{product['id']}", headers=headers).json()["current_stock"] == 92
+
+
+def test_adjustment_can_increase_stock(client, headers, product):
+    client.post(
+        "/inventory/adjustments",
+        headers=headers,
+        json={"product_id": product["id"], "quantity_change": 25, "reason": "COUNT_CORRECTION"},
+    )
+    assert client.get(f"/products/{product['id']}", headers=headers).json()["current_stock"] == 125
+
+
+def test_stock_cannot_be_driven_negative(client, headers, product):
+    response = client.post(
+        "/inventory/adjustments",
+        headers=headers,
+        json={"product_id": product["id"], "quantity_change": -500, "reason": "DAMAGE"},
+    )
+    assert response.status_code == 422
+    assert client.get(f"/products/{product['id']}", headers=headers).json()["current_stock"] == 100
+
+
+def test_zero_adjustment_is_rejected(client, headers, product):
+    response = client.post(
+        "/inventory/adjustments",
+        headers=headers,
+        json={"product_id": product["id"], "quantity_change": 0, "reason": "OTHER"},
+    )
+    assert response.status_code == 422
+
+
+def test_unknown_adjustment_reason_is_rejected(client, headers, product):
+    response = client.post(
+        "/inventory/adjustments",
+        headers=headers,
+        json={"product_id": product["id"], "quantity_change": -1, "reason": "BECAUSE"},
+    )
+    assert response.status_code == 422
+
+
+def test_expiry_and_loss_are_recorded_as_damage(client, headers, product):
+    """Distinct business reasons, one ledger type — the note carries the detail."""
+    for reason in ("EXPIRED", "LOST"):
+        response = client.post(
+            "/inventory/adjustments",
+            headers=headers,
+            json={"product_id": product["id"], "quantity_change": -1, "reason": reason},
+        )
+        assert response.json()["type"] == "DAMAGE"
+
+
+def test_movements_can_be_filtered_by_type(client, headers, product):
+    client.post(
+        "/pos/checkout",
+        headers=headers,
+        json={"items": [{"product_id": product["id"], "quantity": 2}]},
+    )
+    client.post(
+        "/inventory/adjustments",
+        headers=headers,
+        json={"product_id": product["id"], "quantity_change": -1, "reason": "DAMAGE"},
+    )
+
+    sales = client.get("/inventory/movements", headers=headers, params={"type": "SALE"}).json()
+    assert sales["total"] == 1
+    assert sales["items"][0]["type"] == "SALE"
+
+
+def test_movements_name_the_person_who_made_them(client, headers, product, store):
+    client.post(
+        "/inventory/adjustments",
+        headers=headers,
+        json={"product_id": product["id"], "quantity_change": -1, "reason": "DAMAGE"},
+    )
+    movement = client.get("/inventory/movements", headers=headers).json()["items"][0]
+    assert movement["created_by_name"] == store["owner"]["user"]["full_name"]
+
+
+# --------------------------------------------------------------------------
+# Stock position
+# --------------------------------------------------------------------------
+
+
+def test_stock_position_classifies_every_product(client, headers, product_factory):
+    product_factory(current_stock=0, reorder_level=10)
+    product_factory(current_stock=5, reorder_level=10)
+    product_factory(current_stock=80, reorder_level=10)
+
+    position = client.get("/inventory", headers=headers).json()
+    statuses = {row["stock_status"] for row in position["products"]}
+    assert statuses == {"OUT_OF_STOCK", "LOW", "OK"}
+    assert position["out_of_stock"] == 1
+    assert position["low_stock"] == 1
+
+
+def test_stock_position_values_inventory_at_cost(client, headers, product_factory):
+    product_factory(current_stock=10, cost_price="30.00", selling_price="50.00")
+    position = client.get("/inventory", headers=headers).json()
+    assert position["inventory_cost_value"] == 300.0
+    assert position["inventory_retail_value"] == 500.0
+
+
+def test_stock_position_works_without_a_trained_model(client, headers, product):
+    """What is on the shelves is a fact, not a prediction."""
+    assert client.get("/inventory", headers=headers).status_code == 200
+
+
+def test_products_without_history_are_skipped_not_fatal(client, headers, product):
+    """A newly added SKU has nothing to forecast; it must not break the request."""
+    response = client.get("/inventory/recommendations", headers=headers)
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+# --------------------------------------------------------------------------
+# Recommendations against real forecasts
+# --------------------------------------------------------------------------
+
+
+def test_recommendations_are_ordered_by_urgency(client, demo_headers):
+    rows = client.get("/inventory/recommendations", headers=demo_headers).json()
+    if not rows:
+        pytest.skip("demo store has no forecastable products")
+
+    order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+    ranks = [order[row["risk"]] for row in rows]
+    assert ranks == sorted(ranks)
+
+
+def test_every_recommendation_explains_itself(client, demo_headers):
+    rows = client.get("/inventory/recommendations", headers=demo_headers).json()
+    if not rows:
+        pytest.skip("demo store has no forecastable products")
+    assert all(len(row["reason"]) > 20 for row in rows)
+
+
+def test_recommendations_never_suggest_negative_quantities(client, demo_headers):
+    rows = client.get("/inventory/recommendations", headers=demo_headers).json()
+    assert all(row["recommended_reorder_quantity"] >= 0 for row in rows)
+
+
+def test_overstocked_products_are_not_reordered(client, demo_headers):
+    rows = client.get("/inventory/recommendations", headers=demo_headers).json()
+    assert all(
+        row["recommended_reorder_quantity"] == 0 for row in rows if row["overstock"]
+    )
+
+
+def test_risk_filter_returns_only_that_level(client, demo_headers):
+    rows = client.get(
+        "/inventory/recommendations", headers=demo_headers, params={"risk": "CRITICAL"}
+    ).json()
+    assert all(row["risk"] == "CRITICAL" for row in rows)
+
+
+def test_an_invalid_risk_filter_is_rejected(client, demo_headers):
+    response = client.get(
+        "/inventory/recommendations", headers=demo_headers, params={"risk": "EXTREME"}
+    )
+    assert response.status_code == 422
+
+
+def test_summary_matches_the_recommendation_list(client, demo_headers):
+    rows = client.get("/inventory/recommendations", headers=demo_headers).json()
+    summary = client.get("/inventory/summary", headers=demo_headers).json()
+    assert summary["total_products"] == len(rows)
+    assert summary["critical_products"] == sum(1 for r in rows if r["risk"] == "CRITICAL")

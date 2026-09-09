@@ -16,12 +16,20 @@ from app.routes import (
     analytics,
     auth,
     categories,
+    customers,
+    dashboard,
+    expenses,
     forecast,
     inventory,
+    notifications,
     pos,
     products,
+    purchases,
+    reports,
     sales,
+    search,
     stores,
+    suppliers,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -95,7 +103,18 @@ app.include_router(pos.router)
 app.include_router(sales.router)
 app.include_router(forecast.router)
 app.include_router(inventory.router)
+app.include_router(suppliers.router)
+app.include_router(purchases.router)
+app.include_router(customers.router)
+app.include_router(expenses.router)
+app.include_router(notifications.router)
+app.include_router(reports.router)
+app.include_router(search.router)
+app.include_router(dashboard.router)
+# Demand-intelligence analytics (forecast risk, anomalies, movers) and business
+# analytics (revenue, profit, categories) share the /analytics prefix.
 app.include_router(analytics.router)
+app.include_router(dashboard.analytics)
 
 
 @app.get("/health", tags=["system"])
