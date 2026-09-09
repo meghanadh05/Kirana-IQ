@@ -1,0 +1,77 @@
+# Development stack: source is mounted into both app containers so edits apply
+# without a rebuild. For the production images (no mounts, no reload, frontend
+# served from a built bundle) add the prod override:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: kirana-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-kirana_iq}
+      POSTGRES_USER: ${POSTGRES_USER:-kirana}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kirana}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kirana} -d ${POSTGRES_DB:-kirana_iq}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    container_name: kirana-backend
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-kirana_iq}
+      POSTGRES_USER: ${POSTGRES_USER:-kirana}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kirana}
+      CORS_ORIGINS: http://localhost:5173
+      ENVIRONMENT: docker
+      # Sessions do not survive a restart unless this is pinned. The default is
+      # a development value; set JWT_SECRET in .env before deploying.
+      JWT_SECRET: ${JWT_SECRET:-dev-only-insecure-secret-change-me}
+      # Mounted outside /app so the volumes do not nest inside the source mount.
+      DATA_DIR: /data
+      MODEL_DIR: /models
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    # Source is mounted so backend edits are picked up without a rebuild.
+    volumes:
+      - ./backend:/app
+      - ./data:/data
+      - ./models:/models
+      # Mounted so seeding and training can run inside the container, with no
+      # Python needed on the host.
+      - ./scripts:/scripts
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: http://localhost:8000
+    container_name: kirana-frontend
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+    # Source is mounted for live reload. node_modules stays an anonymous volume
+    # so the container keeps its own Linux-native binaries (esbuild, rollup)
+    # instead of inheriting the host's.
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: npm run dev -- --host 0.0.0.0 --port 5173
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:

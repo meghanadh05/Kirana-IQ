@@ -1,0 +1,24 @@
+# Production override. Use with the base file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build
+#
+# Drops the source mounts and the reloaders, so both containers run exactly what
+# their Dockerfile built. Keeps the data and model volumes, since those are
+# state rather than source.
+
+services:
+  backend:
+    environment:
+      # Not "docker": app startup refuses to serve a non-development
+      # environment while JWT_SECRET is still the development default, which
+      # is the point of running this override.
+      ENVIRONMENT: production
+    volumes:
+      - ./data:/data
+      - ./models:/models
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+  frontend:
+    # Serves the bundle produced by `npm run build` at image build time.
+    volumes: []
+    command: npm run preview

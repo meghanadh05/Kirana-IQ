@@ -1,0 +1,46 @@
+date,event_name,affected_category,impact_score
+2025-09-22,Navratri Begins,Snacks,0.30
+2025-09-22,Navratri Begins,Rice & Grains,0.35
+2025-09-22,Navratri Begins,Dairy,0.25
+2025-10-02,Dussehra,Snacks,0.40
+2025-10-02,Dussehra,Beverages,0.30
+2025-10-02,Dussehra,Household,0.25
+2025-10-20,Diwali,ALL,0.35
+2025-10-20,Diwali,Snacks,0.55
+2025-10-20,Diwali,Dairy,0.45
+2025-10-20,Diwali,Household,0.60
+2025-10-20,Diwali,Rice & Grains,0.40
+2025-10-28,Chhath Puja,Rice & Grains,0.30
+2025-10-28,Chhath Puja,Dairy,0.25
+2025-12-25,Christmas,Bakery,0.70
+2025-12-25,Christmas,Snacks,0.45
+2025-12-25,Christmas,Beverages,0.40
+2025-12-25,Christmas,Dairy,0.35
+2026-01-01,New Year,Beverages,0.55
+2026-01-01,New Year,Snacks,0.45
+2026-01-01,New Year,Bakery,0.35
+2026-01-14,Sankranti,Rice & Grains,0.50
+2026-01-14,Sankranti,Dairy,0.40
+2026-01-14,Sankranti,Snacks,0.30
+2026-01-26,Republic Day,Snacks,0.20
+2026-02-15,Maha Shivaratri,Dairy,0.35
+2026-02-15,Maha Shivaratri,Rice & Grains,0.20
+2026-03-04,Holi,Snacks,0.55
+2026-03-04,Holi,Beverages,0.45
+2026-03-04,Holi,Dairy,0.50
+2026-03-04,Holi,Personal Care,0.30
+2026-03-19,Ugadi,Rice & Grains,0.35
+2026-03-19,Ugadi,Dairy,0.25
+2026-03-20,Eid al-Fitr,Snacks,0.45
+2026-03-20,Eid al-Fitr,Dairy,0.40
+2026-03-20,Eid al-Fitr,Bakery,0.35
+2026-03-26,Ram Navami,Rice & Grains,0.20
+2026-04-14,Tamil New Year,Rice & Grains,0.25
+2026-05-27,Eid al-Adha,Snacks,0.35
+2026-05-27,Eid al-Adha,Dairy,0.30
+2026-08-15,Independence Day,Snacks,0.25
+2026-08-15,Independence Day,Beverages,0.20
+2026-08-28,Raksha Bandhan,Snacks,0.40
+2026-08-28,Raksha Bandhan,Dairy,0.30
+2026-09-04,Janmashtami,Dairy,0.45
+2026-09-04,Janmashtami,Snacks,0.25
