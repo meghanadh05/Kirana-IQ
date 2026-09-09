@@ -17,6 +17,7 @@ frontend/dist/
 data/*.csv
 !data/events.csv
 models/*.joblib
+models/*.json
 
 # OS / editor
 .DS_Store
