@@ -1,3 +1,8 @@
+# Development stack: source is mounted into both app containers so edits apply
+# without a rebuild. For the production images (no mounts, no reload, frontend
+# served from a built bundle) add the prod override:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build
 services:
   db:
     image: postgres:16-alpine
@@ -27,6 +32,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kirana}
       CORS_ORIGINS: http://localhost:5173
       ENVIRONMENT: docker
+      # Mounted outside /app so the volumes do not nest inside the source mount.
+      DATA_DIR: /data
+      MODEL_DIR: /models
     ports:
       - "8000:8000"
     depends_on:
@@ -35,8 +43,8 @@ services:
     # Source is mounted so backend edits are picked up without a rebuild.
     volumes:
       - ./backend:/app
-      - ./data:/app/data
-      - ./models:/app/models
+      - ./data:/data
+      - ./models:/models
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   frontend:
@@ -47,6 +55,15 @@ services:
     container_name: kirana-frontend
     ports:
       - "5173:5173"
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+    # Source is mounted for live reload. node_modules stays an anonymous volume
+    # so the container keeps its own Linux-native binaries (esbuild, rollup)
+    # instead of inheriting the host's.
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: npm run dev -- --host 0.0.0.0 --port 5173
     depends_on:
       - backend
 

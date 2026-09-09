@@ -43,6 +43,18 @@ jobs:
           python scripts/generate_data.py
           python scripts/load_data.py --truncate
 
+      - name: Train the forecasting model
+        working-directory: backend
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: 5432
+          POSTGRES_DB: kirana_iq
+          POSTGRES_USER: kirana
+          POSTGRES_PASSWORD: kirana
+        # Without a trained model the forecast and inventory tests skip, and CI
+        # would report green while covering 18 fewer tests.
+        run: python -m app.ml.train_model
+
       - name: Run tests
         working-directory: backend
         env:
@@ -51,7 +63,26 @@ jobs:
           POSTGRES_DB: kirana_iq
           POSTGRES_USER: kirana
           POSTGRES_PASSWORD: kirana
-        run: pytest -v
+        run: pytest -v --strict-markers
+
+      - name: Fail if any test was skipped
+        working-directory: backend
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: 5432
+          POSTGRES_DB: kirana_iq
+          POSTGRES_USER: kirana
+          POSTGRES_PASSWORD: kirana
+        # The suite skips gracefully when the database or model is missing, which
+        # is right for a fresh clone and wrong for CI: here everything is present,
+        # so a skip means the environment is broken.
+        run: |
+          output=$(pytest -q -rs 2>&1)
+          echo "$output"
+          if echo "$output" | grep -qE "[0-9]+ skipped"; then
+            echo "::error::Tests were skipped in CI; the environment is incomplete."
+            exit 1
+          fi
 
   frontend:
     runs-on: ubuntu-latest
@@ -65,6 +96,10 @@ jobs:
       - name: Install dependencies
         working-directory: frontend
         run: npm install
+      - name: Test
+        working-directory: frontend
+        run: npm test -- --run
+
       - name: Build
         working-directory: frontend
         run: npm run build
