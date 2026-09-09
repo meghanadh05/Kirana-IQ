@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.database import check_connection, close_pool, init_db
-from app.routes import products, sales
+from app.routes import analytics, forecast, inventory, products, sales
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -47,6 +47,9 @@ app.add_middleware(
 
 app.include_router(products.router)
 app.include_router(sales.router)
+app.include_router(forecast.router)
+app.include_router(inventory.router)
+app.include_router(analytics.router)
 
 
 @app.get("/health", tags=["system"])
