@@ -32,6 +32,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kirana}
       CORS_ORIGINS: http://localhost:5173
       ENVIRONMENT: docker
+      # Sessions do not survive a restart unless this is pinned. The default is
+      # a development value; set JWT_SECRET in .env before deploying.
+      JWT_SECRET: ${JWT_SECRET:-dev-only-insecure-secret-change-me}
       # Mounted outside /app so the volumes do not nest inside the source mount.
       DATA_DIR: /data
       MODEL_DIR: /models

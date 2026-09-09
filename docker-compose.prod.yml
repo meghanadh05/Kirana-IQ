@@ -8,6 +8,11 @@
 
 services:
   backend:
+    environment:
+      # Not "docker": app startup refuses to serve a non-development
+      # environment while JWT_SECRET is still the development default, which
+      # is the point of running this override.
+      ENVIRONMENT: production
     volumes:
       - ./data:/data
       - ./models:/models
