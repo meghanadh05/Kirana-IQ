@@ -34,12 +34,15 @@ class ProductMover(BaseModel):
     category: str
     total_units: int
     total_revenue: float
+    total_cost: float = 0
+    gross_profit: float = 0
     daily_average: float
     current_stock: int
 
 
 class CategoryTrend(BaseModel):
     category: str
+    current_revenue: float = 0
     current_units: int
     previous_units: int
     change_pct: float | None

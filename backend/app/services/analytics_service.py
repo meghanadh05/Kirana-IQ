@@ -15,11 +15,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from app.config import get_settings
 from app.ml.feature_engineering import build_daily_frame
 from app.models import product as product_model
 from app.models import sale as sale_model
 from app.services import inventory_service
+from app.services import policy as policy_service
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ def _daily_series(history: list[dict[str, Any]]) -> pd.Series:
 def detect_anomaly(
     history: list[dict[str, Any]],
     product: dict[str, Any],
-    settings=None,
+    settings,
 ) -> dict[str, Any] | None:
     """Compare recent demand against the baseline window before it.
 
@@ -44,7 +44,6 @@ def detect_anomaly(
     filters out large-looking swings on products that always swing that much.
     Returns None when the product looks normal.
     """
-    settings = settings or get_settings()
     series = _daily_series(history)
 
     recent_days = settings.anomaly_recent_days
@@ -112,13 +111,13 @@ def detect_anomaly(
     }
 
 
-def detect_anomalies(limit: int | None = None) -> list[dict[str, Any]]:
-    """Scan the catalogue, strongest deviation first."""
-    settings = get_settings()
+def detect_anomalies(store_id: int, limit: int | None = None) -> list[dict[str, Any]]:
+    """Scan a store's catalogue, strongest deviation first."""
+    settings = policy_service.for_store(store_id)
     found: list[dict[str, Any]] = []
 
-    for product in product_model.list_products(limit=1000):
-        history = sale_model.daily_history(product["id"])
+    for product in product_model.list_products(store_id, limit=1000):
+        history = sale_model.daily_history(product["id"], store_id)
         if not history:
             continue
         anomaly = detect_anomaly(history, product, settings)
@@ -134,29 +133,29 @@ def detect_anomalies(limit: int | None = None) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------
 
 
-def product_demand_table(days: int = 30) -> pd.DataFrame:
+def product_demand_table(store_id: int, days: int = 30) -> pd.DataFrame:
     """Units and revenue per product over the trailing window."""
-    rows = sale_model.recent_totals(days)
+    rows = sale_model.recent_totals(store_id, days)
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
-def top_products(days: int = 30, limit: int = 10) -> list[dict[str, Any]]:
+def top_products(store_id: int, days: int = 30, limit: int = 10) -> list[dict[str, Any]]:
     """Best sellers by units over the trailing window."""
-    frame = product_demand_table(days)
+    frame = product_demand_table(store_id, days)
     if frame.empty:
         return []
     frame = frame.sort_values("total_units", ascending=False).head(limit)
     return _movers_payload(frame, days)
 
 
-def slow_moving(days: int = 30, limit: int = 10) -> list[dict[str, Any]]:
+def slow_moving(store_id: int, days: int = 30, limit: int = 10) -> list[dict[str, Any]]:
     """Products selling well below the catalogue average.
 
     Products with no sales at all in the window are included first — they are
     the clearest case of dead stock.
     """
-    settings = get_settings()
-    frame = product_demand_table(days)
+    settings = policy_service.for_store(store_id)
+    frame = product_demand_table(store_id, days)
     if frame.empty:
         return []
 
@@ -175,6 +174,10 @@ def _movers_payload(frame: pd.DataFrame, days: int) -> list[dict[str, Any]]:
             "category": row["category"],
             "total_units": int(row["total_units"]),
             "total_revenue": round(float(row["total_revenue"]), 2),
+            "total_cost": round(float(row.get("total_cost") or 0), 2),
+            "gross_profit": round(
+                float(row["total_revenue"]) - float(row.get("total_cost") or 0), 2
+            ),
             "daily_average": round(float(row["total_units"]) / days, 2),
             "current_stock": int(row["current_stock"]),
         }
@@ -187,9 +190,9 @@ def _movers_payload(frame: pd.DataFrame, days: int) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------
 
 
-def category_trends(days: int = 30) -> list[dict[str, Any]]:
+def category_trends(store_id: int, days: int = 30) -> list[dict[str, Any]]:
     """Per-category demand now versus the equivalent window before it."""
-    rows = sale_model.category_totals(days)
+    rows = sale_model.category_totals(store_id, days)
     if not rows:
         return []
 
@@ -202,6 +205,7 @@ def category_trends(days: int = 30) -> list[dict[str, Any]]:
         trends.append(
             {
                 "category": row["category"],
+                "current_revenue": round(float(row.get("current_revenue") or 0), 2),
                 "current_units": int(current),
                 "previous_units": int(previous),
                 "change_pct": round(change, 1) if change is not None else None,
@@ -219,7 +223,7 @@ def category_trends(days: int = 30) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------
 
 
-def demand_trend(history_days: int = 30, forecast_days: int = 7) -> dict[str, Any]:
+def demand_trend(store_id: int, history_days: int = 30, forecast_days: int = 7) -> dict[str, Any]:
     """Total daily demand across the catalogue: observed, then predicted.
 
     Aggregating the per-SKU forecasts is what makes the dashboard chart cheap —
@@ -227,13 +231,13 @@ def demand_trend(history_days: int = 30, forecast_days: int = 7) -> dict[str, An
     """
     from app.services import forecast_service
 
-    observed = sale_model.daily_totals(history_days)
+    observed = sale_model.daily_totals(store_id, history_days)
     history = [
         {"date": row["sale_date"].isoformat(), "quantity": int(row["quantity"])}
         for row in observed
     ]
 
-    per_product = forecast_service.forecast_catalogue(days=forecast_days)
+    per_product = forecast_service.forecast_catalogue(store_id, days=forecast_days)
     totals: dict[str, int] = {}
     for rows in per_product.values():
         for row in rows:
@@ -250,11 +254,11 @@ def demand_trend(history_days: int = 30, forecast_days: int = 7) -> dict[str, An
 # --------------------------------------------------------------------------
 
 
-def overview(anomaly_limit: int = 5) -> dict[str, Any]:
-    """Everything the dashboard landing page needs, in one request."""
-    recommendations = inventory_service.recommendations()
+def overview(store_id: int, anomaly_limit: int = 5) -> dict[str, Any]:
+    """Everything the forecasting landing page needs, in one request."""
+    recommendations = inventory_service.recommendations(store_id)
     summary = inventory_service.summarise(recommendations)
-    anomalies = detect_anomalies()
+    anomalies = detect_anomalies(store_id)
 
     return {
         **summary,

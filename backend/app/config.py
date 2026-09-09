@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     # Comma-separated list of origins allowed to call the API.
     cors_origins: str = "http://localhost:5173,http://localhost:3000"
 
+    # --- Authentication ---------------------------------------------------
+    # The default is a development convenience only. Deployments must set
+    # JWT_SECRET; app startup refuses to serve a non-development environment
+    # while this value is still in place.
+    jwt_secret: str = "dev-only-insecure-secret-change-me"
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 60 * 24 * 7
+
     # --- Inventory policy -------------------------------------------------
     # Every threshold below is a business decision, not a law, so all of them
     # are environment-configurable.
@@ -80,6 +88,14 @@ class Settings(BaseSettings):
     anomaly_min_zscore: float = 2.0
     # Slow movers: products selling below this fraction of catalogue average.
     slow_moving_threshold: float = 0.25
+
+    @property
+    def is_development(self) -> bool:
+        return self.environment in ("development", "docker", "test")
+
+    @property
+    def jwt_secret_is_default(self) -> bool:
+        return self.jwt_secret == "dev-only-insecure-secret-change-me"
 
     @property
     def database_url(self) -> str:

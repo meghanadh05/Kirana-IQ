@@ -42,6 +42,18 @@ MODEL_PATH = MODEL_DIR / "demand_model.joblib"
 METRICS_PATH = MODEL_DIR / "metrics.json"
 
 
+def output_paths(store_id: int, shared: bool = False) -> tuple[Path, Path]:
+    """Where this training run writes its model and its metrics report.
+
+    `shared` writes to the top-level model file, which every store falls back to
+    until it has trained one of its own.
+    """
+    if shared:
+        return MODEL_PATH, METRICS_PATH
+    directory = MODEL_DIR / f"store_{store_id}"
+    return directory / "demand_model.joblib", directory / "metrics.json"
+
+
 def candidate_models() -> dict[str, Any]:
     """The two candidates, both with fixed seeds so runs are reproducible."""
     return {
@@ -65,18 +77,20 @@ def candidate_models() -> dict[str, Any]:
     }
 
 
-def load_dataset() -> pd.DataFrame:
-    """Build the full feature matrix from what is currently in the database."""
-    products = product_model.list_products(limit=1000)
+def load_dataset(store_id: int) -> pd.DataFrame:
+    """Build the full feature matrix from one store's sales history."""
+    products = product_model.list_products(store_id, limit=1000)
     if not products:
-        raise RuntimeError("No products in the database. Run scripts/load_data.py first.")
+        raise RuntimeError("This store has no products yet.")
 
-    histories = {p["id"]: sale_model.daily_history(p["id"]) for p in products}
+    histories = {p["id"]: sale_model.daily_history(p["id"], store_id) for p in products}
     events = load_events()
 
     frame = build_training_frame(products, histories, events=events)
     if frame.empty:
-        raise RuntimeError("No usable training rows. Products need at least 31 days of history.")
+        raise RuntimeError(
+            "Not enough sales history to train. Products need at least 31 days of sales."
+        )
     return frame
 
 
@@ -85,9 +99,9 @@ def predict_clipped(model: Any, features: pd.DataFrame) -> np.ndarray:
     return np.clip(model.predict(features), 0, None)
 
 
-def train(save: bool = True) -> dict[str, Any]:
-    """Train, select and persist the demand model. Returns a metrics report."""
-    frame = load_dataset()
+def train(store_id: int, save: bool = True, shared: bool = False) -> dict[str, Any]:
+    """Train, select and persist a store's demand model. Returns a metrics report."""
+    frame = load_dataset(store_id)
     train_set, validation_set, test_set = chronological_split(frame)
 
     logger.info(
@@ -159,6 +173,10 @@ def train(save: bool = True) -> dict[str, Any]:
         "products": int(frame["product_id"].nunique()),
     }
 
+    report["training_days"] = (
+        frame["sale_date"].max() - frame["sale_date"].min()
+    ).days + 1
+
     if save:
         # The served model is refit on train+validation+test so it benefits from
         # the most recent weeks. Reported metrics still come from the model that
@@ -166,7 +184,8 @@ def train(save: bool = True) -> dict[str, Any]:
         final_model = candidate_models()[best_name]
         final_model.fit(frame[FEATURE_COLUMNS], frame[TARGET_COLUMN])
 
-        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        model_file, metrics_file = output_paths(store_id, shared)
+        model_file.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(
             {
                 "model": final_model,
@@ -174,18 +193,35 @@ def train(save: bool = True) -> dict[str, Any]:
                 "model_name": best_name,
                 "trained_at": report["trained_at"],
                 "metrics": test_scores,
+                "store_id": store_id,
+                "training_rows": len(frame),
+                "training_days": report["training_days"],
+                "products": report["products"],
             },
-            MODEL_PATH,
+            model_file,
         )
-        METRICS_PATH.write_text(json.dumps(report, indent=2, default=float), encoding="utf-8")
-        logger.info("Saved model to %s", MODEL_PATH)
+        metrics_file.write_text(json.dumps(report, indent=2, default=float), encoding="utf-8")
+        logger.info("Saved model to %s", model_file)
 
     return report
 
 
 def main() -> None:
+    import argparse
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
-    report = train()
+    parser = argparse.ArgumentParser(description="Train the Kirana-IQ demand model.")
+    parser.add_argument(
+        "--store-id", type=int, required=True, help="Store whose sales to train on."
+    )
+    parser.add_argument(
+        "--shared",
+        action="store_true",
+        help="Also write models/demand_model.joblib, the fallback for untrained stores.",
+    )
+    args = parser.parse_args()
+
+    report = train(store_id=args.store_id, shared=args.shared)
 
     print("\nRows      :", report["rows"])
     print("Train     :", " -> ".join(report["date_ranges"]["train"]))

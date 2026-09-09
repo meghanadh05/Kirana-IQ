@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 from pydantic import BaseModel, Field
 
@@ -32,9 +32,41 @@ class ForecastWithHistory(ForecastResponse):
     history: list[HistoryPoint]
 
 
+class ForecastRunOut(BaseModel):
+    id: int
+    status: str
+    model_name: str | None = None
+    rows_used: int | None = None
+    products: int | None = None
+    metrics: dict | None = None
+    error: str | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+
+
 class TrainingStatus(BaseModel):
+    """What the Forecasting screen shows above the Retrain button."""
+
     trained: bool
     model_name: str | None = None
     trained_at: str | None = None
     features: int | None = None
     metrics: dict | None = None
+    store_specific: bool = False
+    training_rows: int | None = None
+    training_days: int | None = None
+    products: int | None = None
+    history_days: int = 0
+    last_run: ForecastRunOut | None = None
+
+
+class TrainingReport(BaseModel):
+    status: str
+    selected_model: str
+    trained_at: str
+    rows: dict
+    products: int
+    training_days: int
+    date_ranges: dict
+    test_scores: dict
+    wape_improvement_over_baseline_pct: float

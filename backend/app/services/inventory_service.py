@@ -17,12 +17,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from app.config import get_settings
 from app.ml.feature_engineering import build_daily_frame
-from app.ml.predict import InsufficientHistoryError, ModelNotTrainedError
+from app.ml.predict import InsufficientHistoryError, ModelNotTrainedError, load_model
 from app.models import product as product_model
 from app.models import sale as sale_model
 from app.services import forecast_service
+from app.services import policy as policy_service
 
 logger = logging.getLogger(__name__)
 
@@ -48,15 +48,13 @@ def demand_variability(history: list[dict[str, Any]], window: int = 30) -> float
 def classify_risk(
     stock_cover_days: float | None,
     lead_time_days: int,
-    settings=None,
+    settings,
 ) -> str:
     """Map stock cover onto a risk level.
 
     The ladder is deliberately lead-time relative: two days of cover is fine if
     the supplier delivers daily, and dangerous if they deliver weekly.
     """
-    settings = settings or get_settings()
-
     if stock_cover_days is None:
         # No predicted demand: stock is not at risk of running out.
         return "LOW"
@@ -69,14 +67,13 @@ def classify_risk(
     return "LOW"
 
 
-def safety_stock(daily_std: float, cover_days: float, settings=None) -> float:
+def safety_stock(daily_std: float, cover_days: float, settings) -> float:
     """Buffer against demand variability over the replenishment window.
 
     Standard formula: z x sigma x sqrt(days). Errors accumulate with the square
     root of time, not linearly, so a 9-day window needs 3x the buffer of a
     1-day window, not 9x.
     """
-    settings = settings or get_settings()
     return settings.service_level_z * daily_std * math.sqrt(max(cover_days, 0))
 
 
@@ -125,15 +122,13 @@ def analyse(
     product: dict[str, Any],
     history: list[dict[str, Any]],
     forecast_rows: list[dict[str, Any]],
-    settings=None,
+    settings,
 ) -> dict[str, Any]:
     """Full inventory assessment for one product.
 
     `forecast_rows` must cover at least lead_time + safety_days so the reorder
     quantity is based on predicted demand rather than an extrapolated average.
     """
-    settings = settings or get_settings()
-
     current_stock = int(product["current_stock"])
     lead_time_days = int(product["lead_time_days"])
     replenishment_days = lead_time_days + settings.safety_days
@@ -177,6 +172,9 @@ def analyse(
         "sku": product["sku"],
         "name": product["name"],
         "category": product["category"],
+        "unit": product.get("unit", "piece"),
+        "supplier_id": product.get("supplier_id"),
+        "cost_price": float(product.get("cost_price") or 0),
         "current_stock": current_stock,
         "reorder_level": int(product["reorder_level"]),
         "lead_time_days": lead_time_days,
@@ -189,45 +187,54 @@ def analyse(
         "safety_stock": round(buffer, 1),
         "target_stock": round(target_stock, 1),
         "recommended_reorder_quantity": reorder_quantity,
+        "estimated_cost": round(reorder_quantity * float(product.get("cost_price") or 0), 2),
         "reason": build_reason(risk, overstock, stock_cover_days, lead_time_days, reorder_quantity),
     }
 
 
-def analyse_product(product_id: int) -> dict[str, Any] | None:
+def analyse_product(product_id: int, store_id: int) -> dict[str, Any] | None:
     """Inventory assessment for one product id, or None when unknown."""
-    product = product_model.get_product(product_id)
+    product = product_model.get_product(product_id, store_id)
     if product is None:
         return None
 
-    settings = get_settings()
+    settings = policy_service.for_store(store_id)
     horizon = max(7, int(product["lead_time_days"]) + settings.safety_days)
 
-    history = sale_model.daily_history(product_id)
+    history = sale_model.daily_history(product_id, store_id)
     if not history:
-        raise InsufficientHistoryError(f"Product {product_id} has no sales history")
+        raise InsufficientHistoryError(f"{product['name']} has no sales history yet")
 
-    forecast_rows = forecast_service.forecast_product(product, days=horizon, history=history)
+    forecast_rows = forecast_service.forecast_product(
+        product, store_id, days=horizon, history=history
+    )
     return analyse(product, history, forecast_rows, settings)
 
 
-def recommendations(risk_filter: str | None = None) -> list[dict[str, Any]]:
-    """Assess the whole catalogue, most urgent first.
+def recommendations(store_id: int, risk_filter: str | None = None) -> list[dict[str, Any]]:
+    """Assess a store's catalogue, most urgent first.
 
     Products without enough history are skipped rather than failing the request.
     """
-    settings = get_settings()
-    products = product_model.list_products(limit=1000)
+    settings = policy_service.for_store(store_id)
+    products = product_model.list_products(store_id, limit=1000)
+
+    # Load the model once for the whole sweep rather than per product.
+    try:
+        bundle = load_model(store_id)
+    except ModelNotTrainedError:
+        raise
 
     results: list[dict[str, Any]] = []
     for product in products:
-        history = sale_model.daily_history(product["id"])
+        history = sale_model.daily_history(product["id"], store_id)
         if not history:
             continue
 
         horizon = max(7, int(product["lead_time_days"]) + settings.safety_days)
         try:
             forecast_rows = forecast_service.forecast_product(
-                product, days=horizon, history=history
+                product, store_id, days=horizon, history=history, model_bundle=bundle
             )
         except (InsufficientHistoryError, ModelNotTrainedError) as exc:
             logger.info("Skipping product %s: %s", product["id"], exc)
@@ -259,4 +266,93 @@ def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "overstocked_products": sum(1 for r in rows if r["overstock"]),
         "expected_7_day_units": round(sum(r["expected_7_day_demand"] for r in rows), 1),
         "total_reorder_units": sum(r["recommended_reorder_quantity"] for r in rows),
+    }
+
+
+# --------------------------------------------------------------------------
+# Ledger
+# --------------------------------------------------------------------------
+
+ADJUSTMENT_REASONS = {
+    "DAMAGE": "DAMAGE",
+    "EXPIRED": "DAMAGE",
+    "LOST": "DAMAGE",
+    "COUNT_CORRECTION": "MANUAL_ADJUSTMENT",
+    "OPENING_STOCK": "OPENING_STOCK",
+    "RETURN": "RETURN",
+    "OTHER": "MANUAL_ADJUSTMENT",
+}
+
+
+def adjust_stock(
+    store_id: int,
+    product_id: int,
+    quantity_change: int,
+    reason: str,
+    notes: str | None,
+    user_id: int,
+) -> dict[str, Any]:
+    """Apply a manual stock correction and record why it happened."""
+    from app.database import transaction
+    from app.errors import NotFoundError, ValidationError
+    from app.models import inventory as inventory_model
+
+    if quantity_change == 0:
+        raise ValidationError("Adjustment quantity cannot be zero")
+    if reason not in ADJUSTMENT_REASONS:
+        raise ValidationError(f"reason must be one of {list(ADJUSTMENT_REASONS)}")
+
+    product = product_model.get_product(product_id, store_id)
+    if product is None:
+        raise NotFoundError(f"Product {product_id} not found")
+
+    try:
+        with transaction() as conn:
+            movement = inventory_model.apply_movement(
+                conn,
+                store_id=store_id,
+                product_id=product_id,
+                quantity_change=quantity_change,
+                transaction_type=ADJUSTMENT_REASONS[reason],
+                reference_type="ADJUSTMENT",
+                notes=notes or reason.replace("_", " ").title(),
+                created_by=user_id,
+            )
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+
+    return {
+        **movement,
+        "product_name": product["name"],
+        "sku": product["sku"],
+    }
+
+
+def stock_position(store_id: int, limit: int = 500) -> dict[str, Any]:
+    """On-hand stock for every active product, plus store-level totals.
+
+    This is the view that works without a trained model: it answers "what is on
+    my shelves" from the ledger alone, while the forecasting endpoints answer
+    "what should I order".
+    """
+    from app.models import inventory as inventory_model
+
+    rows = inventory_model.stock_status_rows(store_id, limit=limit)
+    stats = product_model.catalogue_stats(store_id)
+
+    return {
+        "products": [
+            {
+                **row,
+                "cost_price": float(row["cost_price"]),
+                "selling_price": float(row["selling_price"]),
+                "stock_value": round(float(row["stock_value"]), 2),
+            }
+            for row in rows
+        ],
+        "total_products": int(stats["total"]),
+        "out_of_stock": int(stats["out_of_stock"]),
+        "low_stock": int(stats["low_stock"]),
+        "inventory_cost_value": round(float(stats["inventory_cost_value"]), 2),
+        "inventory_retail_value": round(float(stats["inventory_retail_value"]), 2),
     }

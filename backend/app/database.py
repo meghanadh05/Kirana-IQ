@@ -19,7 +19,7 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 _pool: ConnectionPool | None = None
 
@@ -74,12 +74,58 @@ def execute(sql: str, params: tuple | dict | None = None) -> int:
         return cur.rowcount
 
 
+@contextmanager
+def transaction() -> Iterator[Connection]:
+    """A connection whose work commits as one unit, or not at all.
+
+    psycopg wraps the `with conn` block in a transaction already; this exists so
+    call sites read as what they are — `with transaction() as conn:` around a
+    checkout says "these six statements land together or none of them do".
+    """
+    with get_pool().connection() as conn:
+        yield conn
+
+
+def applied_migrations(conn: Connection) -> set[str]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version    TEXT PRIMARY KEY,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        cur.execute("SELECT version FROM schema_migrations")
+        return {row["version"] for row in cur.fetchall()}
+
+
 def init_db() -> None:
-    """Apply the schema. Idempotent."""
-    sql = SCHEMA_PATH.read_text(encoding="utf-8")
-    with get_connection() as conn, conn.cursor() as cur:
-        cur.execute(sql)
-    logger.info("Database schema applied")
+    """Apply any migrations this database has not seen yet.
+
+    Migrations are plain `.sql` files applied in filename order and recorded in
+    `schema_migrations`, each inside its own transaction. Ad-hoc schema
+    recreation would lose a live store's data; this will not.
+    """
+    files = sorted(MIGRATIONS_DIR.glob("*.sql"))
+    if not files:
+        logger.warning("No migrations found in %s", MIGRATIONS_DIR)
+        return
+
+    with get_connection() as conn:
+        done = applied_migrations(conn)
+
+    for path in files:
+        version = path.stem
+        if version in done:
+            continue
+        logger.info("Applying migration %s", version)
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute(path.read_text(encoding="utf-8"))
+            cur.execute(
+                "INSERT INTO schema_migrations (version) VALUES (%s)", (version,)
+            )
+        logger.info("Migration %s applied", version)
 
 
 def check_connection() -> bool:

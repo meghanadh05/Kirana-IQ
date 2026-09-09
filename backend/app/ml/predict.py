@@ -35,6 +35,24 @@ logger = logging.getLogger(__name__)
 
 MODEL_PATH = MODEL_DIR / "demand_model.joblib"
 
+
+def model_path(store_id: int | None = None) -> Path:
+    """Where a store's model lives.
+
+    Each store trains on its own sales, so each gets its own artefact. Passing
+    None addresses the shared model, which is what a freshly created store uses
+    until it has trained one of its own.
+    """
+    if store_id is None:
+        return MODEL_PATH
+    return MODEL_DIR / f"store_{store_id}" / "demand_model.joblib"
+
+
+def resolve_model_path(store_id: int | None = None) -> Path:
+    """The store's own model when it has one, otherwise the shared model."""
+    candidate = model_path(store_id)
+    return candidate if candidate.exists() else MODEL_PATH
+
 SUPPORTED_HORIZONS = (7, 14, 30)
 
 
@@ -52,19 +70,20 @@ def _load_bundle(path_str: str, mtime: float) -> dict[str, Any]:
     return joblib.load(path_str)
 
 
-def load_model() -> dict[str, Any]:
+def load_model(store_id: int | None = None) -> dict[str, Any]:
     """Return the saved model bundle, reloading it if the file changed."""
-    if not MODEL_PATH.exists():
+    path = resolve_model_path(store_id)
+    if not path.exists():
         raise ModelNotTrainedError(
-            "No trained model found. Train one with: python -m app.ml.train_model"
+            "No trained model yet. Train one from Forecasting → Retrain Model."
         )
-    return _load_bundle(str(MODEL_PATH), MODEL_PATH.stat().st_mtime)
+    return _load_bundle(str(path), path.stat().st_mtime)
 
 
-def model_info() -> dict[str, Any] | None:
+def model_info(store_id: int | None = None) -> dict[str, Any] | None:
     """Metadata about the current model, or None when untrained."""
     try:
-        bundle = load_model()
+        bundle = load_model(store_id)
     except ModelNotTrainedError:
         return None
     return {
@@ -72,6 +91,10 @@ def model_info() -> dict[str, Any] | None:
         "trained_at": bundle["trained_at"],
         "metrics": bundle["metrics"],
         "features": len(bundle["feature_columns"]),
+        "store_specific": model_path(store_id).exists() if store_id else False,
+        "training_rows": bundle.get("training_rows"),
+        "training_days": bundle.get("training_days"),
+        "products": bundle.get("products"),
     }
 
 
